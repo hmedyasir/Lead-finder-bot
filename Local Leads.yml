@@ -1,0 +1,40 @@
+name: Local business lead finder
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # once a day at 6am UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  find-leads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # safety cap so a stuck run doesn't burn minutes forever
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run lead finder
+        env:
+          INDUSTRIES: hvac_plumbing,roofing_electrical,dental_chiro,law_firms
+          CITIES: ${{ secrets.CITIES }}
+          GOOGLE_PAGESPEED_KEY: ${{ secrets.GOOGLE_PAGESPEED_KEY }}
+          PREMIUM_SCORE: "4"
+          DISCORD_WEBHOOK_HVAC_PLUMBING: ${{ secrets.DISCORD_WEBHOOK_HVAC_PLUMBING }}
+          DISCORD_WEBHOOK_ROOFING_ELECTRICAL: ${{ secrets.DISCORD_WEBHOOK_ROOFING_ELECTRICAL }}
+          DISCORD_WEBHOOK_DENTAL_CHIRO: ${{ secrets.DISCORD_WEBHOOK_DENTAL_CHIRO }}
+          DISCORD_WEBHOOK_LAW_FIRMS: ${{ secrets.DISCORD_WEBHOOK_LAW_FIRMS }}
+          DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
+        run: node local-leads.mjs
+
+      - name: Save dedup state only (not the leads file — repo is public)
+        run: |
+          git config user.name "lead-bot"
+          git config user.email "lead-bot@users.noreply.github.com"
+          git add seen-local.json 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "update seen list" && git push)
