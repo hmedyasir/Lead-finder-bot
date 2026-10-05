@@ -10,6 +10,7 @@
 // Run:  node --env-file=.env local-leads.mjs
 
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // 1. INDUSTRIES — add/remove/edit freely. `tag` is the OpenStreetMap tag used
@@ -256,13 +257,31 @@ async function postToDiscord(webhook, leads, heading) {
   }
 }
 
+// Saves seen-local.json to disk, and — when running inside GitHub Actions —
+// commits and pushes it right away. This means progress survives even if the
+// job gets killed or times out partway through a long multi-city run.
+function persistSeen(seen) {
+  fs.writeFileSync(SEEN_FILE, JSON.stringify([...seen]));
+  if (!process.env.GITHUB_ACTIONS) return; // only commit when running in CI
+  try {
+    execSync(`git config user.name "lead-bot"`, { stdio: "ignore" });
+    execSync(`git config user.email "lead-bot@users.noreply.github.com"`, { stdio: "ignore" });
+    execSync(`git add ${SEEN_FILE}`, { stdio: "ignore" });
+    execSync(`git diff --cached --quiet || git commit -m "update seen list"`, { stdio: "ignore" });
+    execSync(`git push`, { stdio: "ignore" });
+  } catch (e) {
+    console.warn(`Could not commit/push seen list mid-run (will retry later): ${e.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Main
+// Main — processes one city at a time and sends each batch to Discord (and
+// saves progress) immediately, instead of waiting for the whole run to finish.
 // ---------------------------------------------------------------------------
 async function main() {
   const seen = new Set(fs.existsSync(SEEN_FILE) ? JSON.parse(fs.readFileSync(SEEN_FILE, "utf8")) : []);
-  const byIndustry = {}; // key -> array of new leads
-  const premium = [];
+  let totalNew = 0;
+  let totalPremium = 0;
 
   for (const key of ACTIVE_INDUSTRIES) {
     const def = INDUSTRIES[key];
@@ -270,7 +289,7 @@ async function main() {
       console.warn(`Unknown industry key "${key}", skipping. Valid keys: ${Object.keys(INDUSTRIES).join(", ")}`);
       continue;
     }
-    byIndustry[key] = [];
+    const webhook = process.env[def.webhookEnv] || "";
 
     for (const city of CITIES) {
       let elements = [];
@@ -282,6 +301,7 @@ async function main() {
       }
       console.log(`${def.label} in ${city}: ${elements.length} found on the map`);
 
+      const batch = [];
       for (const el of elements) {
         if (seen.has(`${el.type}/${el.id}`)) continue;
         let lead = buildLead(el, city, key);
@@ -289,36 +309,34 @@ async function main() {
         lead = scoreNoWebsiteSignals(lead);
         lead = await scorePageSpeed(lead); // no-op if GOOGLE_PAGESPEED_KEY isn't set
         seen.add(lead.id);
-        byIndustry[key].push(lead);
-        if (lead.score >= PREMIUM_SCORE) premium.push(lead);
+        batch.push(lead);
       }
+
+      if (batch.length) {
+        appendCsv(batch); // kept locally even though it's not committed from CI
+        const premiumBatch = batch.filter((l) => l.score >= PREMIUM_SCORE);
+        const normalBatch = batch.filter((l) => l.score < PREMIUM_SCORE);
+
+        if (webhook && normalBatch.length) {
+          await postToDiscord(webhook, normalBatch, `${def.label} — ${city}`);
+        } else if (!webhook && normalBatch.length) {
+          console.log(`(No ${def.webhookEnv} set — skipping Discord post for ${def.label})`);
+        }
+        if (premiumBatch.length) {
+          await postToDiscord(PREMIUM_WEBHOOK, premiumBatch, `⭐ Premium — ${def.label} — ${city}`);
+        }
+
+        totalNew += batch.length;
+        totalPremium += premiumBatch.length;
+        persistSeen(seen); // save + commit right after this city, not at the very end
+      }
+
       await sleep(1000); // be polite to the free Overpass server
     }
   }
 
-  const allNew = Object.values(byIndustry).flat();
-  allNew.sort((a, b) => b.score - a.score);
-  console.log(`\n${allNew.length} total new leads across ${ACTIVE_INDUSTRIES.length} industries.`);
-  console.log(`${premium.length} flagged premium (score >= ${PREMIUM_SCORE}).\n`);
-
-  if (allNew.length) {
-    appendCsv(allNew);
-    fs.writeFileSync(SEEN_FILE, JSON.stringify([...seen]));
-  }
-
-  for (const key of ACTIVE_INDUSTRIES) {
-    const def = INDUSTRIES[key];
-    if (!def) continue;
-    const webhook = process.env[def.webhookEnv] || "";
-    const leads = (byIndustry[key] || []).filter((l) => l.score < PREMIUM_SCORE); // premium ones go to the premium channel instead
-    if (!webhook) {
-      console.log(`(No ${def.webhookEnv} set — skipping Discord post for ${def.label})`);
-      continue;
-    }
-    await postToDiscord(webhook, leads, def.label);
-  }
-
-  await postToDiscord(PREMIUM_WEBHOOK, premium, "⭐ Premium leads (all industries)");
+  console.log(`\n${totalNew} total new leads across ${ACTIVE_INDUSTRIES.length} industries.`);
+  console.log(`${totalPremium} flagged premium (score >= ${PREMIUM_SCORE}).\n`);
 }
 
 main().catch((e) => {
