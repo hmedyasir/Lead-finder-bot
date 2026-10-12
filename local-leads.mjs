@@ -239,7 +239,11 @@ async function postToDiscord(webhook, leads, heading) {
       chunk
         .map((l) => {
           const maps = l.lat ? `https://www.google.com/maps?q=${l.lat},${l.lon}` : "no coordinates";
-          const contact = [l.email && `📧 ${l.email}`, l.facebook && `📘 ${l.facebook}`, l.phone && `📞 ${l.phone}`]
+          // One-click manual WhatsApp check: opens a chat if the number is on WhatsApp.
+          const digits = (l.phone || "").replace(/\D/g, "");
+          const waDigits = digits.length === 10 ? `1${digits}` : digits; // assume US if 10 digits
+          const wa = waDigits.length >= 10 ? `💬 <https://wa.me/${waDigits}>` : "";
+          const contact = [l.email && `📧 ${l.email}`, l.facebook && `📘 ${l.facebook}`, l.phone && `📞 ${l.phone}`, wa]
             .filter(Boolean)
             .join(" · ") || "no contact in map data — check their Facebook/Google listing by hand";
           return `**${l.name}** (${l.city}) · score ${l.score}\n${l.why.join(", ")}\n${contact}\n${
